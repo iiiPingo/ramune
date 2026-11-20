@@ -1,0 +1,64 @@
+{
+  "announced": {},
+  "heartbeat_at": 1795188264,
+  "initialized_at": 1795188264,
+  "last_summary": "2026-11-20",
+  "shows": {
+    "129898": {
+      "mal_id": 47790,
+      "since": 1795188264,
+      "title": "The World's Finest Assassin Gets Reincarnated in Another World as an Aristocrat"
+    },
+    "159042": {
+      "mal_id": 53913,
+      "since": 1795188264,
+      "title": "Reincarnated as a Sword Season 2"
+    },
+    "189123": {
+      "mal_id": 61323,
+      "since": 1795188264,
+      "title": "Blue Box Season 2"
+    },
+    "198727": {
+      "mal_id": 62484,
+      "since": 1795188264,
+      "title": "Chitose Is in the Ramune Bottle 2nd Cour"
+    },
+    "205909": {
+      "mal_id": 63293,
+      "since": 1795188264,
+      "title": "Firefly Wedding"
+    },
+    "207191": {
+      "mal_id": 63409,
+      "since": 1795188264,
+      "title": "Hello, I am a Witch and my Crush Wants me to Make a Love Potion!"
+    },
+    "207329": {
+      "mal_id": 63431,
+      "since": 1795188264,
+      "title": "The Laid-Off Cheat-Granting Mage Enjoys a Second Lease on Life"
+    },
+    "20992": {
+      "mal_id": 28891,
+      "since": 1795188264,
+      "title": "HAIKYU!! 2nd Season"
+    },
+    "212888": {
+      "mal_id": 64340,
+      "since": 1795188264,
+      "title": "Overgeared"
+    }
+  },
+  "watching_cache": {
+    "28891": "Haikyuu!! Second Season",
+    "47790": "Sekai Saikou no Ansatsusha, Isekai Kizoku ni Tensei suru",
+    "53913": "Tensei shitara Ken deshita II",
+    "61323": "Ao no Hako Season 2",
+    "62484": "Chitose-kun wa Ramune Bin no Naka Part 2",
+    "63293": "Hotaru no Yomeiri",
+    "63409": "Doumo, Suki na Hito ni Horegusuri wo Irai sareta Majo desu.",
+    "63431": "Tsuihou sareta Cheat Fuyo Majutsushi wa Kimama na Second Life wo Ouka suru. Ore wa Buki dake ja Naku, Arayuru Mono ni \"Kyouka Point\" wo Fuyo Dekiru shi, Ore no Ishi de Itsudemo Kouka wo Kaijo Dekiru kedo, Nokotta Hitotachi Daijoubu?",
+    "64340": "Tempal: Item no Chikara"
+  }
+}
