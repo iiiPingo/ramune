@@ -33,6 +33,7 @@ jobs:
           TIMEZONE: ${{ vars.TIMEZONE }}
           EPISODE_ALERTS: ${{ vars.EPISODE_ALERTS }}
           DAILY_SUMMARY: ${{ vars.DAILY_SUMMARY }}
+          SCHEDULE_CHANGES: ${{ vars.SCHEDULE_CHANGES }}
           SUMMARY_HOUR: ${{ vars.SUMMARY_HOUR }}
           ANNOUNCE_DELAY_MINUTES: ${{ vars.ANNOUNCE_DELAY_MINUTES }}
           LOOKBACK_HOURS: ${{ vars.LOOKBACK_HOURS }}
