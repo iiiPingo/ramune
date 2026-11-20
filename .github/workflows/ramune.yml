@@ -31,6 +31,7 @@ jobs:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
           MAL_USERNAME: ${{ vars.MAL_USERNAME }}
           TIMEZONE: ${{ vars.TIMEZONE }}
+          EPISODE_ALERTS: ${{ vars.EPISODE_ALERTS }}
           DAILY_SUMMARY: ${{ vars.DAILY_SUMMARY }}
           SUMMARY_HOUR: ${{ vars.SUMMARY_HOUR }}
           ANNOUNCE_DELAY_MINUTES: ${{ vars.ANNOUNCE_DELAY_MINUTES }}
