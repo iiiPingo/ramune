@@ -65,6 +65,7 @@ Same page → **Variables** tab → **New repository variable**:
 | `DAILY_SUMMARY` | `true` to get a "today's schedule" message each morning | optional (default off) |
 | `EPISODE_ALERTS` | `false` to skip per-episode messages (morning schedule only) | optional (default on) |
 | `SCHEDULE_CHANGES` | `false` to stop "schedule change" messages when an episode in today's digest moves or is pulled | optional (default on) |
+| `UP_NEXT` | `false` to stop the pinned "Up next" message (one message, edited in place when the list changes) | optional (default on) |
 | `SUMMARY_HOUR` | hour for the summary, `0`–`23` local time | optional (default `9`) |
 | `TIMEZONE` | e.g. `Asia/Dubai` | optional (default `Asia/Dubai`) |
 | `ANNOUNCE_DELAY_MINUTES` | wait this long after the Japan TV air time (see notes) | optional (default `0`) |
