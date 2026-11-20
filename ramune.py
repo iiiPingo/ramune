@@ -201,6 +201,7 @@ class Config:
         self.tz_name = env("TIMEZONE", "Asia/Dubai")
         self.tz = load_tz(self.tz_name)
         self.tz_label = self.tz_name.split("/")[-1].replace("_", " ")
+        self.episode_alerts = env_bool("EPISODE_ALERTS", True)
         self.daily_summary = env_bool("DAILY_SUMMARY", False)
         self.summary_hour = env_int("SUMMARY_HOUR", 9, 0, 23)
         self.delay = env_int("ANNOUNCE_DELAY_MINUTES", 0, 0, 24 * 60) * 60
@@ -597,11 +598,14 @@ def process(cfg, state, now):
                 continue
             if ep["airingAt"] <= tracked[str(ep["mediaId"])]["since"]:
                 continue
-            log(f"Announcing: {show['title']} Ep {ep['episode']}")
-            announce(cfg, show, ep, now)
+            if cfg.episode_alerts:
+                log(f"Announcing: {show['title']} Ep {ep['episode']}")
+                announce(cfg, show, ep, now)
+                time.sleep(1)
+            else:
+                log(f"Aired (episode alerts off): {show['title']} Ep {ep['episode']}")
             announced[key] = ep["airingAt"]
             announced_now.append(f"{show['title']} Ep {ep['episode']}")
-            time.sleep(1)
     if not announced_now and not first_run:
         log("No new episodes.")
 
