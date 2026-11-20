@@ -203,6 +203,7 @@ class Config:
         self.tz_label = self.tz_name.split("/")[-1].replace("_", " ")
         self.episode_alerts = env_bool("EPISODE_ALERTS", True)
         self.daily_summary = env_bool("DAILY_SUMMARY", False)
+        self.schedule_changes = env_bool("SCHEDULE_CHANGES", True)
         self.summary_hour = env_int("SUMMARY_HOUR", 9, 0, 23)
         self.delay = env_int("ANNOUNCE_DELAY_MINUTES", 0, 0, 24 * 60) * 60
         self.lookback = env_int("LOOKBACK_HOURS", 72, 6, 24 * 14) * 3600
@@ -474,6 +475,59 @@ def send_summary(cfg, shows, schedule, now):
     }
     content = f"🫧 Today's schedule: {len(today)} episode{'s' if len(today) != 1 else ''}"
     discord_post(cfg, {"content": content, "embeds": [embed]})
+    return today
+
+
+def check_schedule_changes(cfg, digest, shows, schedule, now):
+    """After the morning digest: one message if any of today's episodes moved or was pulled."""
+    eps = digest["eps"]
+    current = {f"{e['mediaId']}:{e['episode']}": e["airingAt"] for e in schedule}
+    lines, updates = [], {}
+    for key, was in sorted(eps.items(), key=lambda kv: kv[1]):
+        mid, ep = (int(x) for x in key.split(":"))
+        show = shows.get(mid)
+        if not show:  # you dropped it from your list, not a schedule change
+            updates[key] = None
+            continue
+        if was < now - 2 * 3600:  # aired a while ago
+            continue
+        title = f"**{clip(show['title'], 80)}** Ep {ep}"
+        old = fmt_clock(datetime.fromtimestamp(was, cfg.tz))
+        if key in current:
+            new = current[key]
+            if abs(new - was) < 5 * 60:
+                continue
+            new_dt = datetime.fromtimestamp(new, cfg.tz)
+            if new_dt.strftime("%Y-%m-%d") == digest["date"]:
+                lines.append(f"⏰ {title} moved: {old} → {fmt_clock(new_dt)}")
+                updates[key] = new
+            else:
+                lines.append(f"📅 {title} moved to {fmt_local(new, cfg.tz)} (was {old})")
+                updates[key] = None
+            continue
+        nxt = show["next"]
+        if nxt and nxt["episode"] == ep:
+            lines.append(f"📅 {title} postponed to {fmt_local(nxt['airingAt'], cfg.tz)} (was {old})")
+        elif was > now:
+            lines.append(f"❌ {title} pulled from today's schedule (was {old}, no new date yet)")
+        else:
+            continue
+        updates[key] = None
+
+    if lines:
+        log("Schedule changed: " + " | ".join(lines))
+        embed = {
+            "title": f"Schedule change · {datetime.fromtimestamp(now, cfg.tz).strftime('%a %d %b')}",
+            "description": clip("\n".join(lines), 4096),
+            "color": BRAND_COLOR,
+            "footer": {"text": f"Ramune · times in {cfg.tz_label}"},
+        }
+        discord_post(cfg, {"content": "🫧 Schedule change in today's lineup", "embeds": [embed]})
+    for key, value in updates.items():
+        if value is None:
+            eps.pop(key, None)
+        else:
+            eps[key] = value
 
 
 def send_test(cfg, watching, shows, unmapped, now):
@@ -615,8 +669,11 @@ def process(cfg, state, now):
         cfg.daily_summary and local_now.hour >= cfg.summary_hour and state.get("last_summary") != today_str
     ):
         log("Sending today's schedule")
-        send_summary(cfg, shows, schedule, now)
+        today = send_summary(cfg, shows, schedule, now)
         state["last_summary"] = today_str
+        state["digest"] = {"date": today_str, "eps": {f"{e['mediaId']}:{e['episode']}": e["airingAt"] for e in today}}
+    elif cfg.schedule_changes and (state.get("digest") or {}).get("date") == today_str:
+        check_schedule_changes(cfg, state["digest"], shows, schedule, now)
     if cfg.mode == "test":
         log("Sending test message")
         send_test(cfg, watching, shows, unmapped, now)
