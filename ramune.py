@@ -10,6 +10,7 @@ Flow:  MAL (watching list)  ->  AniList (idMal -> airing schedule)
 Standard library only, so the workflow needs no pip install.
 """
 
+import hashlib
 import json
 import os
 import sys
@@ -204,6 +205,7 @@ class Config:
         self.episode_alerts = env_bool("EPISODE_ALERTS", True)
         self.daily_summary = env_bool("DAILY_SUMMARY", False)
         self.schedule_changes = env_bool("SCHEDULE_CHANGES", True)
+        self.up_next = env_bool("UP_NEXT", True)
         self.summary_hour = env_int("SUMMARY_HOUR", 9, 0, 23)
         self.delay = env_int("ANNOUNCE_DELAY_MINUTES", 0, 0, 24 * 60) * 60
         self.lookback = env_int("LOOKBACK_HOURS", 72, 6, 24 * 14) * 3600
@@ -530,6 +532,67 @@ def check_schedule_changes(cfg, digest, shows, schedule, now):
             eps[key] = value
 
 
+def up_next_text(cfg, shows):
+    upcoming = sorted((s for s in shows.values() if s["next"]), key=lambda s: s["next"]["airingAt"])
+    waiting = sorted(s["title"] for s in shows.values()
+                     if not s["next"] and s["status"] in ("RELEASING", "NOT_YET_RELEASED", "HIATUS"))
+    lines = []
+    for s in upcoming:
+        dt = datetime.fromtimestamp(s["next"]["airingAt"], cfg.tz)
+        lines.append(f"`{dt.strftime('%a %d %b')} {fmt_clock(dt):>8}`  "
+                     f"[{clip(s['title'], 60)}]({s['mal_url']}) · Ep {s['next']['episode']}")
+    if not lines:
+        lines.append("Nothing from your Watching list is scheduled right now.")
+    if waiting:
+        lines.append("\n**No date yet:** " + ", ".join(clip(t, 60) for t in waiting))
+    return "\n".join(lines)
+
+
+def update_up_next(cfg, state, shows, now):
+    """One pinned message, edited in place whenever the list changes."""
+    desc = clip(up_next_text(cfg, shows), 4096)
+    digest = hashlib.sha1(desc.encode("utf-8")).hexdigest()[:12]
+    info = state.get("up_next") or {}
+    if info.get("id") and info.get("hash") == digest:
+        return
+    embed = {
+        "title": "Up next",
+        "description": desc,
+        "color": BRAND_COLOR,
+        "footer": {"text": f"Ramune · times in {cfg.tz_label} · list last changed"},
+        "timestamp": iso(now),
+    }
+    base = cfg.webhook.split("?")[0].rstrip("/")
+    if info.get("id"):
+        code, data = http("PATCH", f"{base}/messages/{info['id']}",
+                          body={"embeds": [embed], "allowed_mentions": {"parse": []}}, what="Discord")
+        if code in (200, 204):
+            state["up_next"] = {"id": info["id"], "hash": digest}
+            log("Up next: message updated")
+            return
+        if code == 404 and isinstance(data, dict) and data.get("code") == 10008:
+            log("Up next: message was deleted, posting a new one")
+        elif code in (401, 403, 404):
+            raise ConfigError(f"Discord rejected the webhook (HTTP {code}). If you deleted or regenerated it, "
+                              "update the DISCORD_WEBHOOK_URL secret.")
+        else:
+            raise UpstreamError(f"Discord HTTP {code}: {data}")
+    code, data = http("POST", f"{base}?wait=true", what="Discord", body={
+        "username": "Ramune",
+        "content": "📌 Pin this one. Ramune keeps it updated.",
+        "embeds": [embed],
+        "allowed_mentions": {"parse": []},
+        "flags": 4096,  # silent: no push notification
+    })
+    if code in (401, 403, 404):
+        raise ConfigError(f"Discord rejected the webhook (HTTP {code}). If you deleted or regenerated it, "
+                          "update the DISCORD_WEBHOOK_URL secret.")
+    if code != 200 or not isinstance(data, dict) or "id" not in data:
+        raise UpstreamError(f"Discord HTTP {code}: {data}")
+    state["up_next"] = {"id": str(data["id"]), "hash": digest}
+    log("Up next: posted a new message (pin it in Discord)")
+
+
 def send_test(cfg, watching, shows, unmapped, now):
     airing = sorted((s for s in shows.values() if s["next"]), key=lambda s: s["next"]["airingAt"])
     quiet = len(shows) - len(airing)
@@ -677,6 +740,9 @@ def process(cfg, state, now):
     if cfg.mode == "test":
         log("Sending test message")
         send_test(cfg, watching, shows, unmapped, now)
+
+    if cfg.up_next:
+        update_up_next(cfg, state, shows, now)
 
     # 7. Housekeeping
     for key in [k for k, ts in announced.items() if ts < now - ANNOUNCED_KEEP]:
