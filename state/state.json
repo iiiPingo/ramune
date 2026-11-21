@@ -1,8 +1,12 @@
 {
   "announced": {},
+  "digest": {
+    "date": "2026-11-21",
+    "eps": {}
+  },
   "heartbeat_at": 1795188264,
   "initialized_at": 1795188264,
-  "last_summary": "2026-11-20",
+  "last_summary": "2026-11-21",
   "shows": {
     "129898": {
       "mal_id": 47790,
