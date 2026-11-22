@@ -16,6 +16,7 @@ MAL "Watching" list ──► AniList (idMal → airing schedule) ──► new 
 | `ramune.py` | The notifier. Python standard library only, nothing to install. |
 | `.github/workflows/ramune.yml` | Runs it every 15 min + a manual "Run workflow" button. |
 | `state/state.json` | Created on the first run. Remembers what was already announced. |
+| `tests/test_ramune.py` | Offline test suite (fake MAL, AniList and Discord): `python3 -m unittest discover -s tests` |
 
 ---
 
@@ -69,6 +70,11 @@ Same page → **Variables** tab → **New repository variable**:
 | `SUMMARY_HOUR` | hour for the summary, `0`–`23` local time | optional (default `9`) |
 | `TIMEZONE` | e.g. `Asia/Dubai` | optional (default `Asia/Dubai`) |
 | `ANNOUNCE_DELAY_MINUTES` | wait this long after the Japan TV air time (see notes) | optional (default `0`) |
+| `FAIL_ALERT` | `false` to stop the one-time "can't reach MyAnimeList / AniList" message | optional (default on) |
+| `FAIL_ALERT_FROM` / `FAIL_ALERT_TO` | local hours that message may be sent in (`13` to `23` = 1 PM up to 11 PM) | optional (default `13` / `23`) |
+| `SUMMARY_LINKS` | `false` to drop the Crunchyroll / Anikoto links from the morning schedule | optional (default on) |
+| `ANIKOTO_URL` | Anikoto's current domain, e.g. `anikototv.bz`, or a full search URL with `{q}` for the title, or `off` | optional (default `https://anikototv.bz`) |
+| `PTW_ALERTS` | `false` to stop Plan to Watch alerts | optional (default on) |
 
 ### 6. Run the test
 
@@ -106,8 +112,34 @@ Discord also holds mobile pushes while you're active on desktop; that's
   the next run still catches the episode and the alert says how long ago it aired.
 - A show you add to your Watching list starts being tracked from that moment. Its old episodes aren't announced.
 - If MAL is down, it uses the last known Watching list. If AniList or Discord is down, it retries with backoff,
-  and the next run catches up. After ~2 hours of failures in a row you get a Discord warning and a failed
-  run (GitHub emails you).
+  and the next run catches up.
+- If MyAnimeList or AniList stays unreachable for 8 runs in a row (~2 hours), Ramune sends **one** short
+  "can't reach it" message, only between `FAIL_ALERT_FROM` and `FAIL_ALERT_TO` (1 PM to 11 PM by default).
+  An outage that starts at night is reported when the window opens, if it's still going. No repeats and no
+  "it's back" message; a new outage later gets a new message. If **Discord** is what's broken, Ramune can't
+  message you, so the run goes red instead (GitHub emails you), same as before.
+
+## Morning schedule links
+
+Each show in the morning schedule gets two links:
+- **Crunchyroll:** taken from AniList's streaming links when the show has one. It goes to the series page;
+  AniList doesn't have per-episode Crunchyroll links.
+- **Anikoto:** a search for the show's title. Anikoto's show URLs end in a random code
+  (`/watch/overgeared-a487c`), which nothing outside the site knows, so a direct link would mean scraping
+  Anikoto every run. The search is the reliable option. When Anikoto moves domains, change `ANIKOTO_URL`.
+
+## Plan to Watch alerts
+
+Ramune also reads your MAL **Plan to Watch** list and sends one message when a show actually comes out:
+- **Weekly shows** (AniList has an airing schedule): when episode 1 airs.
+- **Released all at once** (movies, Netflix-style batches, which AniList gives no schedule): when AniList
+  marks it Releasing or Finished and its start date has arrived.
+
+Each show is alerted once. Anything already out the first time Ramune sees it (including everything on your
+list when this feature first runs) is recorded silently. Weak spots: AniList status for unscheduled
+releases is updated by volunteers, so a batch alert can be hours or a day late; a movie counts as "out" when
+it opens in Japanese cinemas, not when it streams; and a show AniList lists as Releasing with no schedule
+(common for some web shows) is treated as released all at once.
 - State is committed whenever something changes, plus at least once a week, so GitHub never disables the
   schedule for inactivity (it does that after 60 days without activity on public repos).
 

@@ -38,6 +38,12 @@ jobs:
           SUMMARY_HOUR: ${{ vars.SUMMARY_HOUR }}
           ANNOUNCE_DELAY_MINUTES: ${{ vars.ANNOUNCE_DELAY_MINUTES }}
           LOOKBACK_HOURS: ${{ vars.LOOKBACK_HOURS }}
+          FAIL_ALERT: ${{ vars.FAIL_ALERT }}
+          FAIL_ALERT_FROM: ${{ vars.FAIL_ALERT_FROM }}
+          FAIL_ALERT_TO: ${{ vars.FAIL_ALERT_TO }}
+          SUMMARY_LINKS: ${{ vars.SUMMARY_LINKS }}
+          ANIKOTO_URL: ${{ vars.ANIKOTO_URL }}
+          PTW_ALERTS: ${{ vars.PTW_ALERTS }}
           MODE: ${{ inputs.mode || 'normal' }}
         run: python3 ramune.py
 

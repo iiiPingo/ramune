@@ -7,6 +7,9 @@ Flow:  MAL (watching list)  ->  AniList (idMal -> airing schedule)
        ->  find episodes that aired since we last looked  ->  Discord webhook
        ->  remember what was announced in state/state.json (committed back).
 
+Also: Plan to Watch premieres / full releases, Crunchyroll + Anikoto links in
+the morning schedule, and one quiet "can't reach MAL/AniList" alert.
+
 Standard library only, so the workflow needs no pip install.
 """
 
@@ -25,13 +28,15 @@ STATE_PATH = os.path.join(ROOT, "state", "state.json")
 
 MAL_API = "https://api.myanimelist.net/v2"
 ANILIST_API = "https://graphql.anilist.co"
-USER_AGENT = "Ramune/1.0 (anime episode notifier; GitHub Actions)"
+USER_AGENT = "Ramune/1.1 (anime episode notifier; GitHub Actions)"
 
 BRAND_COLOR = 0x5EC8E5          # ramune soda blue
 NEW_SHOW_GRACE = 30 * 60        # a show added between runs still gets an episode that aired in the last 30 min
 ANNOUNCED_KEEP = 30 * 86400     # forget announced episodes after 30 days
 HEARTBEAT_EVERY = 7 * 86400     # touch state weekly so the repo never looks inactive
 FAIL_ALERT_AFTER = 8            # consecutive upstream failures (~2h) before the run goes red
+ANIKOTO_DEFAULT = "https://anikototv.bz"   # search lives at /filter?keyword=
+RELEASED = ("RELEASING", "FINISHED")
 
 
 # --------------------------------------------------------------------------- utils
@@ -41,7 +46,12 @@ class ConfigError(Exception):
 
 
 class UpstreamError(Exception):
-    """MAL / AniList / Discord temporarily unavailable. Retried next run."""
+    """MAL / AniList / Discord temporarily unavailable. Retried next run.
+    `service` is "MyAnimeList", "AniList" or "Discord" (the http() `what`)."""
+
+    def __init__(self, msg, service=None):
+        super().__init__(msg)
+        self.service = service
 
 
 def log(msg):
@@ -168,7 +178,7 @@ def http(method, url, headers=None, body=None, what="request", attempts=5):
                     time.sleep(min(wait, 60))
                     backoff = min(backoff * 2, 60)
                     continue
-                raise UpstreamError(f"{what} kept failing (HTTP {err.code})")
+                raise UpstreamError(f"{what} kept failing (HTTP {err.code})", what)
             return err.code, payload
         except (urllib.error.URLError, TimeoutError, ConnectionError, OSError) as err:
             if attempt < attempts:
@@ -176,8 +186,8 @@ def http(method, url, headers=None, body=None, what="request", attempts=5):
                 time.sleep(backoff)
                 backoff = min(backoff * 2, 60)
                 continue
-            raise UpstreamError(f"{what} unreachable: {err}")
-    raise UpstreamError(f"{what} failed")
+            raise UpstreamError(f"{what} unreachable: {err}", what)
+    raise UpstreamError(f"{what} failed", what)
 
 
 # --------------------------------------------------------------------------- config
@@ -210,6 +220,15 @@ class Config:
         self.delay = env_int("ANNOUNCE_DELAY_MINUTES", 0, 0, 24 * 60) * 60
         self.lookback = env_int("LOOKBACK_HOURS", 72, 6, 24 * 14) * 3600
         self.mode = env("MODE", "normal").lower()
+        # 1) one-time "can't reach MAL / AniList" alert, only inside this local-hour window
+        self.fail_alert = env_bool("FAIL_ALERT", True)
+        self.fail_from = env_int("FAIL_ALERT_FROM", 13, 0, 23)
+        self.fail_to = env_int("FAIL_ALERT_TO", 23, 0, 24)
+        # 2) Crunchyroll + Anikoto links in the morning schedule
+        self.summary_links = env_bool("SUMMARY_LINKS", True)
+        self.anikoto = env("ANIKOTO_URL", ANIKOTO_DEFAULT)
+        # 3) Plan to Watch: alert on premiere / full release
+        self.ptw_alerts = env_bool("PTW_ALERTS", True)
 
 
 # --------------------------------------------------------------------------- state
@@ -245,8 +264,12 @@ def save_state(state):
 # --------------------------------------------------------------------------- MAL
 
 def fetch_mal_watching(cfg):
+    return fetch_mal_list(cfg, "watching")
+
+
+def fetch_mal_list(cfg, status):
     query = urllib.parse.urlencode({
-        "status": "watching",
+        "status": status,
         "limit": 1000,
         "nsfw": "true",
         "fields": "list_status,num_episodes,alternative_titles,status",
@@ -263,7 +286,7 @@ def fetch_mal_watching(cfg):
         if code == 404:
             raise ConfigError(f"MyAnimeList user {cfg.username!r} not found. Check the MAL_USERNAME variable.")
         if code != 200 or not isinstance(data, dict):
-            raise UpstreamError(f"MyAnimeList returned HTTP {code}")
+            raise UpstreamError(f"MyAnimeList returned HTTP {code}", "MyAnimeList")
         for row in data.get("data", []):
             node = row.get("node") or {}
             if "id" not in node:
@@ -287,6 +310,7 @@ query ($ids: [Int], $page: Int) {
     pageInfo { hasNextPage }
     media(idMal_in: $ids, type: ANIME) {
       id idMal status episodes format siteUrl
+      startDate { year month day }
       title { romaji english }
       coverImage { large color }
       nextAiringEpisode { episode airingAt }
@@ -312,7 +336,7 @@ def anilist(query, variables):
     code, data = http("POST", ANILIST_API, body={"query": query, "variables": variables}, what="AniList")
     if code != 200 or not isinstance(data, dict) or data.get("errors"):
         errors = (data or {}).get("errors") if isinstance(data, dict) else None
-        raise UpstreamError(f"AniList HTTP {code}: {errors}")
+        raise UpstreamError(f"AniList HTTP {code}: {errors}", "AniList")
     return data["data"]
 
 
@@ -356,6 +380,7 @@ def build_show(mal, media):
     streams = [l for l in (media.get("externalLinks") or [])
                if (l.get("type") == "STREAMING") and l.get("url") and l.get("site")]
     romaji = title.get("romaji") or mal.get("title") or ""
+    crunchyroll = next((l["url"] for l in streams if l["site"].strip().lower() == "crunchyroll"), None)
     return {
         "anilist_id": media["id"],
         "mal_id": mal["mal_id"],
@@ -370,7 +395,43 @@ def build_show(mal, media):
         "next": media.get("nextAiringEpisode"),
         "watched": mal.get("watched"),
         "streams": streams[:3],
+        "crunchyroll": crunchyroll,
+        "format": media.get("format"),
+        "start": media.get("startDate") or {},
     }
+
+
+# --------------------------------------------------------------------------- watch links
+
+def md_url(url):
+    """Keep a URL from breaking Discord's [text](url) markdown."""
+    return url.replace(" ", "%20").replace("(", "%28").replace(")", "%29")
+
+
+def anikoto_url(cfg, title):
+    """Anikoto has no ID we can look up (its show URLs end in a random code like
+    /watch/overgeared-a487c), so this is a search for the title on the site.
+    ANIKOTO_URL can be a domain (search at /filter?keyword=) or a full template with {q}."""
+    base = (cfg.anikoto or "").strip()
+    if not base or base.lower() in ("off", "false", "none", "0"):
+        return None
+    if not base.lower().startswith(("http://", "https://")):
+        base = "https://" + base
+    q = urllib.parse.quote_plus(title or "")
+    if "{q}" in base:
+        return base.replace("{q}", q)
+    return f"{base.rstrip('/')}/filter?keyword={q}"
+
+
+def watch_links(cfg, show):
+    """Crunchyroll (from AniList, show page) and Anikoto (title search), as markdown."""
+    links = []
+    if show.get("crunchyroll"):
+        links.append(f"[Crunchyroll]({md_url(show['crunchyroll'])})")
+    ak = anikoto_url(cfg, show["title"])
+    if ak:
+        links.append(f"[Anikoto]({md_url(ak)})")
+    return links
 
 
 # --------------------------------------------------------------------------- discord
@@ -456,7 +517,12 @@ def send_summary(cfg, shows, schedule, now):
             show = shows[e["mediaId"]]
             mark = "✅" if e["airingAt"] + cfg.delay <= now else "🕒"
             clock = fmt_clock(datetime.fromtimestamp(e["airingAt"], cfg.tz))
-            lines.append(f"{mark} `{clock:>8}`  [{clip(show['title'], 80)}]({show['mal_url']}) · Ep {e['episode']}")
+            line = f"{mark} `{clock:>8}`  [{clip(show['title'], 80)}]({show['mal_url']}) · Ep {e['episode']}"
+            if cfg.summary_links:
+                links = watch_links(cfg, show)
+                if links:
+                    line += "\n\u2003\u2003" + " · ".join(links)
+            lines.append(line)
         desc = "\n".join(lines)
     else:
         desc = "Nothing from your Watching list airs today."
@@ -620,6 +686,213 @@ def send_test(cfg, watching, shows, unmapped, now):
                        "embeds": embeds})
 
 
+# --------------------------------------------------------------------------- outage alert
+
+def outage_failed(state, service, now):
+    out = state.setdefault("outages", {})
+    entry = out.setdefault(service, {"count": 0, "since": now, "alerted": False})
+    entry["count"] += 1
+
+
+def outage_ok(state, service):
+    """Recovered: forget it silently (no "back up" message)."""
+    out = state.get("outages") or {}
+    if out.pop(service, None) is not None:
+        log(f"{service} is reachable again")
+    if not out:
+        state.pop("outages", None)
+
+
+def in_window(hour, start, end):
+    if start == end:
+        return True
+    if start < end:
+        return start <= hour < end
+    return hour >= start or hour < end  # window wraps past midnight
+
+
+def maybe_outage_alert(cfg, state, now):
+    """One short Discord message per outage, only inside FAIL_ALERT_FROM..FAIL_ALERT_TO.
+    An outage that started at night is reported when the window opens, if it's still going."""
+    if not cfg.fail_alert:
+        return
+    out = state.get("outages") or {}
+    due = sorted(name for name, e in out.items()
+                 if e.get("count", 0) >= FAIL_ALERT_AFTER and not e.get("alerted"))
+    if not due:
+        return
+    hour = datetime.fromtimestamp(now, cfg.tz).hour
+    if not in_window(hour, cfg.fail_from, cfg.fail_to):
+        log(f"Outage alert for {', '.join(due)} waits for {cfg.fail_from}:00 ({cfg.tz_label})")
+        return
+    since = min(out[n].get("since", now) for n in due)
+    names = " and ".join(f"**{n}**" for n in due)
+    text = (f"⚠️ Ramune can't reach {names} (since {fmt_local(since, cfg.tz)}). "
+            "It keeps retrying and catches up by itself.")
+    try:
+        discord_post(cfg, {"content": text})
+    except Exception as err:  # Discord itself is down: try again next run
+        log(f"Couldn't send the outage alert: {err}")
+        return
+    for n in due:
+        out[n]["alerted"] = True
+    log(f"Sent outage alert: {', '.join(due)}")
+
+
+# --------------------------------------------------------------------------- plan to watch
+
+def start_reached(show, now):
+    """AniList startDate on or before today (UTC). Unknown parts count as reached."""
+    st = show.get("start") or {}
+    if not st.get("year"):
+        return True
+    today = datetime.fromtimestamp(now, timezone.utc).date()
+    try:
+        start = datetime(st["year"], st.get("month") or 1, st.get("day") or 1).date()
+    except ValueError:
+        return True
+    return start <= today
+
+
+def ptw_release(show, entry, ep1_at, now, delay):
+    """Decide whether a Plan to Watch show is out. Returns (kind, when) or None.
+
+    Weekly show = AniList has (or once had) an airing schedule for it.
+      Out when episode 1's scheduled time has passed, or AniList marks it
+      RELEASING/FINISHED and the next scheduled episode is past 1 (or there is none).
+    All-at-once = AniList never showed a schedule (movies, Netflix-style drops).
+      Out when the status turns RELEASING/FINISHED and the start date has come.
+    """
+    nxt = show.get("next")
+    status = show.get("status")
+    scheduled = bool(entry.get("sched") or nxt or ep1_at is not None)
+    fmt = show.get("format")
+    if scheduled:
+        if ep1_at is not None:            # exact time known: trust it (and the delay)
+            out = ep1_at + delay <= now
+        else:
+            out = status in RELEASED and (not nxt or nxt.get("episode", 1) > 1)
+        if not out:
+            return None
+        if fmt == "MOVIE":
+            kind = "movie"
+        elif status == "FINISHED" and not nxt:
+            kind = "batch"
+        else:
+            kind = "premiere"
+        return kind, ep1_at
+    if status in RELEASED and start_reached(show, now):
+        return ("movie" if fmt == "MOVIE" else "batch"), None
+    return None
+
+
+FORMAT_NAMES = {"TV": "TV", "TV_SHORT": "TV short", "MOVIE": "Movie", "SPECIAL": "Special",
+                "OVA": "OVA", "ONA": "ONA", "MUSIC": "Music"}
+
+
+def ptw_embed(cfg, show, kind, when, now):
+    total = show.get("episodes")
+    if kind == "movie":
+        headline = "**The movie is out!**"
+    elif kind == "batch":
+        headline = f"**All {total} episodes are out!**" if total and total > 1 else "**It's out!**"
+    else:
+        headline = "**Episode 1 is out!**"
+    headline += "\nFrom your Plan to Watch list"
+
+    fields = []
+    if show["romaji"] and show["romaji"] != show["title"]:
+        fields.append({"name": "Romaji", "value": clip(show["romaji"], 1024), "inline": False})
+    fmt = FORMAT_NAMES.get(show.get("format") or "", (show.get("format") or "Anime").title())
+    if total and kind != "movie":
+        fmt += f" · {total} episode{'s' if total != 1 else ''}"
+    fields.append({"name": "Format", "value": fmt, "inline": True})
+    if when:
+        fields.append({"name": "Aired", "value": f"{fmt_local(when, cfg.tz)} ({cfg.tz_label})", "inline": True})
+    links = watch_links(cfg, show) or [f"[MyAnimeList]({show['mal_url']})"]
+    fields.append({"name": "Watch", "value": clip(" · ".join(links), 1024), "inline": False})
+
+    embed = {
+        "title": clip(show["title"], 256),
+        "url": show["mal_url"],
+        "description": headline,
+        "color": show["color"],
+        "fields": fields,
+        "footer": {"text": "Ramune · Plan to Watch"},
+        "timestamp": iso(when or now),
+    }
+    if show["cover"]:
+        embed["thumbnail"] = {"url": show["cover"]}
+    return embed
+
+
+def check_plan_to_watch(cfg, state, now):
+    """Alert once when a Plan to Watch show premieres or is released all at once.
+    The first time a show is seen (including the very first run) it is only recorded,
+    so anything already out is never announced."""
+    try:
+        ptw = fetch_mal_list(cfg, "plan_to_watch")
+    except UpstreamError as err:
+        warn(f"Plan to Watch skipped this run: {err}")
+        return
+    pstate = state.setdefault("ptw", {})
+    seen = pstate.setdefault("seen", {})
+    done = pstate.setdefault("done", {})
+    on_list = {str(w["mal_id"]) for w in ptw}
+    for store in (seen, done):           # removed from Plan to Watch: forget it
+        for key in [k for k in store if k not in on_list]:
+            del store[key]
+
+    todo = [w for w in ptw if str(w["mal_id"]) not in done]
+    if not todo:
+        return
+    media_by_mal = fetch_anilist_media([w["mal_id"] for w in todo])
+    shows = {}
+    for w in todo:
+        media = media_by_mal.get(w["mal_id"])
+        if media:
+            shows[w["mal_id"]] = build_show(w, media)
+    by_aid = {s["anilist_id"]: s for s in shows.values()}
+    ep1 = {}
+    if by_aid:
+        for e in fetch_schedules(list(by_aid), now - cfg.lookback, now + 7 * 86400):
+            if e["episode"] == 1:
+                ep1[by_aid[e["mediaId"]]["mal_id"]] = e["airingAt"]
+
+    alerts, first_seen = [], 0
+    for mal_id, show in shows.items():
+        key = str(mal_id)
+        entry = seen.get(key)
+        result = ptw_release(show, entry or {}, ep1.get(mal_id), now, cfg.delay)
+        if entry is None:                 # new to us: record, never announce what's already out
+            first_seen += 1
+            if result:
+                done[key] = now
+            else:
+                seen[key] = {"since": now, "sched": bool(show["next"] or mal_id in ep1)}
+            continue
+        if show["next"] or mal_id in ep1:
+            entry["sched"] = True
+        if result:
+            alerts.append((show, result))
+    if first_seen:
+        log(f"Plan to Watch: recorded {first_seen} show(s) as a starting point")
+
+    for group in chunks(alerts, 10):      # Discord allows 10 embeds per message
+        names = ", ".join(clip(s["title"], 60) for s, _ in group)
+        if len(group) == 1:
+            content = f"🫧 **{clip(group[0][0]['title'], 200)}** from your Plan to Watch is out"
+        else:
+            content = f"🫧 {len(group)} shows from your Plan to Watch are out"
+        log(f"Plan to Watch out: {names}")
+        discord_post(cfg, {"content": clip(content, 2000),
+                           "embeds": [ptw_embed(cfg, s, kind, when, now) for s, (kind, when) in group]})
+        for s, _ in group:
+            key = str(s["mal_id"])
+            seen.pop(key, None)
+            done[key] = now
+        time.sleep(1)
+
 # --------------------------------------------------------------------------- job summary
 
 def write_job_summary(cfg, shows, unmapped, announced_now, now):
@@ -650,19 +923,25 @@ def process(cfg, state, now):
     first_run = not state.get("initialized_at")
 
     # 1. MAL watching list (fall back to the last known list if MAL is down)
+    mal_ok = True
     try:
         watching = fetch_mal_watching(cfg)
         state["watching_cache"] = {str(w["mal_id"]): w["title"] for w in watching}
+        outage_ok(state, "MyAnimeList")
     except UpstreamError as err:
         cache = state.get("watching_cache") or {}
         if not cache:
             raise
+        mal_ok = False
+        outage_failed(state, "MyAnimeList", now)
         warn(f"{err}. Using the last known Watching list ({len(cache)} shows).")
         watching = [{"mal_id": int(k), "title": v, "title_en": "", "watched": None} for k, v in cache.items()]
     log(f"MAL: {len(watching)} shows on {cfg.username}'s Watching list")
 
     # 2. Map to AniList
     media_by_mal = fetch_anilist_media([w["mal_id"] for w in watching]) if watching else {}
+    if watching:
+        outage_ok(state, "AniList")
     shows, unmapped = {}, []
     for w in watching:
         media = media_by_mal.get(w["mal_id"])
@@ -741,8 +1020,13 @@ def process(cfg, state, now):
         log("Sending test message")
         send_test(cfg, watching, shows, unmapped, now)
 
+    if cfg.ptw_alerts and mal_ok:
+        check_plan_to_watch(cfg, state, now)
+
     if cfg.up_next:
         update_up_next(cfg, state, shows, now)
+
+    maybe_outage_alert(cfg, state, now)
 
     # 7. Housekeeping
     for key in [k for k, ts in announced.items() if ts < now - ANNOUNCED_KEEP]:
@@ -753,6 +1037,28 @@ def process(cfg, state, now):
     write_job_summary(cfg, shows, unmapped, announced_now, now)
 
 
+def run(cfg, state, now):
+    """One check. Returns the exit code; the caller saves state."""
+    try:
+        process(cfg, state, now)
+        state.pop("failures", None)
+        return 0
+    except ConfigError as err:
+        print(f"::error::{err}", flush=True)
+        return 1
+    except UpstreamError as err:
+        failures = state.get("failures", 0) + 1
+        state["failures"] = failures
+        warn(f"{err} (failure {failures} in a row; the next run will catch up on anything missed)")
+        if err.service in ("MyAnimeList", "AniList"):
+            outage_failed(state, err.service, now)
+            maybe_outage_alert(cfg, state, now)
+        # Discord down: no message possible, the red run (GitHub email) is the alert
+        if failures == FAIL_ALERT_AFTER or (failures > FAIL_ALERT_AFTER and failures % 48 == 0):
+            return 1  # red run -> GitHub emails you
+        return 0
+
+
 def main():
     try:
         cfg = Config()
@@ -761,30 +1067,9 @@ def main():
         return 1
 
     state = load_state()
-    now = int(time.time())
-    try:
-        process(cfg, state, now)
-        state.pop("failures", None)
-        save_state(state)
-        return 0
-    except ConfigError as err:
-        save_state(state)
-        print(f"::error::{err}", flush=True)
-        return 1
-    except UpstreamError as err:
-        failures = state.get("failures", 0) + 1
-        state["failures"] = failures
-        save_state(state)
-        warn(f"{err} (failure {failures} in a row; the next run will catch up on anything missed)")
-        if failures == FAIL_ALERT_AFTER:
-            try:
-                discord_post(cfg, {"content": "⚠️ Ramune has failed to check for episodes for about 2 hours "
-                                              f"in a row. Last error: {clip(str(err), 300)}"})
-            except Exception:
-                pass
-        if failures == FAIL_ALERT_AFTER or (failures > FAIL_ALERT_AFTER and failures % 48 == 0):
-            return 1  # red run -> GitHub emails you
-        return 0
+    code = run(cfg, state, int(time.time()))
+    save_state(state)
+    return code
 
 
 if __name__ == "__main__":
