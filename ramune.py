@@ -40,6 +40,7 @@ HEARTBEAT_EVERY = 7 * 86400     # touch state weekly so the repo never looks ina
 FAIL_ALERT_AFTER = 8            # consecutive upstream failures (~2h) before the run goes red
 ANIKOTO_DEFAULT = "https://anikototv.bz"   # search lives at /filter?keyword=
 RELEASED = ("RELEASING", "FINISHED")
+ANIKOTO_DOWN_PAUSE = 3600       # after Anikoto fails to load, skip lookups for an hour
 ANIKOTO_MISS_RETRY = 24 * 3600  # a show Anikoto didn't have is searched again after a day
 
 
@@ -232,6 +233,7 @@ class Config:
         self.summary_links = env_bool("SUMMARY_LINKS", True)
         self.anikoto = env("ANIKOTO_URL", ANIKOTO_DEFAULT)
         self.anikoto_direct = env_bool("ANIKOTO_DIRECT", True)   # exact episode links when found
+        self.up_next_anikoto = env_bool("UP_NEXT_ANIKOTO", True)  # pinned list links to Anikoto, not MAL
         # 3) Plan to Watch: alert on premiere / full release
         self.ptw_alerts = env_bool("PTW_ALERTS", True)
 
@@ -516,6 +518,8 @@ def anikoto_lookup(cfg, state, show, now):
         return hit
     if isinstance(hit, int) and now - hit < ANIKOTO_MISS_RETRY:
         return None
+    if now - state.get("anikoto_down_at", 0) < ANIKOTO_DOWN_PAUSE:
+        return None  # Anikoto was unreachable recently: don't slow every run down retrying
     wanted = {norm_title(n) for n in show.get("names") or [show["title"]]} - {""}
     queries = []
     for q in (show.get("mal_title"), show["title"], show.get("romaji")):
@@ -524,7 +528,9 @@ def anikoto_lookup(cfg, state, show, now):
     for q in queries[:2]:
         page = fetch_text(parts[1].replace("{q}", urllib.parse.quote_plus(q)), "Anikoto")
         if page is None:
-            return None  # site unreachable: don't record a miss, try again next time
+            state["anikoto_down_at"] = now  # unreachable: pause lookups for an hour, no miss recorded
+            return None
+        state.pop("anikoto_down_at", None)
         parser = _AnikotoResults()
         try:
             parser.feed(page)
@@ -730,25 +736,51 @@ def check_schedule_changes(cfg, digest, shows, schedule, now):
             eps[key] = value
 
 
-def up_next_text(cfg, shows):
+def anikoto_show_url(cfg, state, show, now):
+    """The show's page on Anikoto (no episode), a title search if it isn't matched, or MAL if Anikoto is off."""
+    parts = anikoto_parts(cfg)
+    slug = anikoto_lookup(cfg, state, show, now) if state is not None else None
+    if parts and slug:
+        return f"{parts[0]}/watch/{slug}"
+    return anikoto_url(cfg, show["title"]) or show["mal_url"]
+
+
+def up_next_text(cfg, shows, state=None, now=None):
+    """Phone-friendly list: each show is its own bold, tappable title line (linking to Anikoto),
+    with the time and episode underneath and a blank line between shows."""
+    now = now or int(time.time())
     upcoming = sorted((s for s in shows.values() if s["next"]), key=lambda s: s["next"]["airingAt"])
-    waiting = sorted(s["title"] for s in shows.values()
-                     if not s["next"] and s["status"] in ("RELEASING", "NOT_YET_RELEASED", "HIATUS"))
-    lines = []
+    waiting = sorted((s for s in shows.values()
+                      if not s["next"] and s["status"] in ("RELEASING", "NOT_YET_RELEASED", "HIATUS")),
+                     key=lambda s: s["title"].lower())
+
+    def link(s):
+        url = anikoto_show_url(cfg, state, s, now) if cfg.up_next_anikoto else s["mal_url"]
+        return f"**[{clip(s['title'], 80)}]({md_url(url)})**"
+
+    blocks = []
     for s in upcoming:
         dt = datetime.fromtimestamp(s["next"]["airingAt"], cfg.tz)
-        lines.append(f"`{dt.strftime('%a %d %b')} {fmt_clock(dt):>8}`  "
-                     f"[{clip(s['title'], 60)}]({s['mal_url']}) · Ep {s['next']['episode']}")
-    if not lines:
-        lines.append("Nothing from your Watching list is scheduled right now.")
+        blocks.append(f"{link(s)}\n`{dt.strftime('%a %d %b')} · {fmt_clock(dt)}` · Ep {s['next']['episode']}")
+    if not blocks:
+        blocks.append("Nothing from your Watching list is scheduled right now.")
     if waiting:
-        lines.append("\n**No date yet:** " + ", ".join(clip(t, 60) for t in waiting))
-    return "\n".join(lines)
+        blocks.append("**No date yet**")
+        blocks += [link(s) for s in waiting]
+
+    out, used = [], 0
+    for i, b in enumerate(blocks):          # never cut a link in half at Discord's 4096 limit
+        if used + len(b) + 2 > 4000:
+            out.append(f"…and {len(blocks) - i} more")
+            break
+        out.append(b)
+        used += len(b) + 2
+    return "\n\n".join(out)
 
 
 def update_up_next(cfg, state, shows, now):
     """One pinned message, edited in place whenever the list changes."""
-    desc = clip(up_next_text(cfg, shows), 4096)
+    desc = clip(up_next_text(cfg, shows, state, now), 4096)
     digest = hashlib.sha1(desc.encode("utf-8")).hexdigest()[:12]
     info = state.get("up_next") or {}
     if info.get("id") and info.get("hash") == digest:

@@ -44,6 +44,7 @@ jobs:
           SUMMARY_LINKS: ${{ vars.SUMMARY_LINKS }}
           ANIKOTO_URL: ${{ vars.ANIKOTO_URL }}
           ANIKOTO_DIRECT: ${{ vars.ANIKOTO_DIRECT }}
+          UP_NEXT_ANIKOTO: ${{ vars.UP_NEXT_ANIKOTO }}
           PTW_ALERTS: ${{ vars.PTW_ALERTS }}
           MODE: ${{ inputs.mode || 'normal' }}
         run: python3 ramune.py

@@ -75,6 +75,7 @@ Same page → **Variables** tab → **New repository variable**:
 | `SUMMARY_LINKS` | `false` to drop the Crunchyroll / Anikoto links from the morning schedule | optional (default on) |
 | `ANIKOTO_URL` | Anikoto's current domain, e.g. `anikototv.bz`, or a full search URL with `{q}` for the title, or `off` | optional (default `https://anikototv.bz`) |
 | `ANIKOTO_DIRECT` | `false` to skip the Anikoto lookup and always link a title search | optional (default on) |
+| `UP_NEXT_ANIKOTO` | `false` to make the pinned "Up next" titles open MyAnimeList again instead of Anikoto | optional (default on) |
 | `PTW_ALERTS` | `false` to stop Plan to Watch alerts | optional (default on) |
 
 ### 6. Run the test
@@ -133,6 +134,13 @@ Each show in the morning schedule gets two links:
   unreachable from GitHub: you get a search link for the title instead, and a missing show is retried a day
   later. Set `ANIKOTO_DIRECT=false` to always use search links. When Anikoto moves domains, change
   `ANIKOTO_URL`; saved codes keep working on the new domain.
+
+## Pinned "Up next" list
+
+Each show is its own bold title line (easy to tap on a phone) that opens the show's page on Anikoto, with
+the next episode's day, time and number underneath and a blank line between shows. Shows Ramune can't match
+on Anikoto open a title search instead. If Anikoto can't be reached, lookups pause for an hour so the
+15-minute runs stay fast.
 
 ## Plan to Watch alerts
 

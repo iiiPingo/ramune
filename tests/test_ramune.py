@@ -721,6 +721,65 @@ class AnikotoEpisodeLinks(Base):
         watch = [f for f in e["fields"] if f["name"] == "Watch"][0]["value"]
         self.assertIn("[Anikoto Ep 1](https://anikototv.bz/watch/firefly-wedding-94459/ep-1)", watch)
 
+    def up_next(self, now=None, **env):
+        self.run_at(now or at(22, 6), UP_NEXT="true", DAILY_SUMMARY="false", **env)
+        if self.world.patches:
+            return self.world.patches[-1]["embeds"][0]["description"]
+        return [p for p in self.world.posts if "Pin this" in (p.get("content") or "")][-1]["embeds"][0]["description"]
+
+    def test_up_next_links_anikoto_show_page(self):
+        self.world.add("watching", 1, "Ao no Hako Season 2", english="Blue Box Season 2",
+                       next_ep={"episode": 8, "airingAt": at(23, 19)})
+        self.world.add("watching", 2, "Hotaru no Yomeiri 2", english="Firefly Wedding 2",
+                       next_ep={"episode": 2, "airingAt": at(24, 1)})
+        self.world.add("watching", 3, "Tempal: Item no Chikara", english="Overgeared", next_ep=None)
+        d = self.up_next()
+        self.assertIn("**[Blue Box Season 2](https://anikototv.bz/watch/blue-box-season-2)**", d)
+        self.assertNotIn("/ep-", d)                               # the show page, not an episode
+        self.assertNotIn("myanimelist.net", d)
+        self.assertIn("**[Firefly Wedding 2](https://anikototv.bz/filter?keyword=Firefly+Wedding+2)**", d)
+        self.assertIn("**No date yet**\n\n**[Overgeared](https://anikototv.bz/watch/overgeared-a487c)**", d)
+        first = d.split("\n\n")[0]
+        self.assertEqual(first.split("\n")[1], "`Mon 23 Nov · 7:00 PM` · Ep 8")  # time under the title
+
+    def test_up_next_lookups_are_cached(self):
+        self.world.add("watching", 1, "Ao no Hako Season 2", english="Blue Box Season 2",
+                       next_ep={"episode": 8, "airingAt": at(23, 19)})
+        self.up_next(at(22, 6))
+        n = len(self.world.anikoto_requests)
+        for i in range(1, 6):
+            self.up_next(at(22, 6) + i * 900)
+        self.assertEqual(len(self.world.anikoto_requests), n)
+
+    def test_up_next_anikoto_down_pauses_lookups(self):
+        for i in range(5):
+            self.world.add("watching", 1 + i, f"Show {i}", next_ep={"episode": 2, "airingAt": at(23, 19 + i)})
+        self.world.anikoto_down = True
+        d = self.up_next(at(22, 6))
+        self.assertEqual(len(self.world.anikoto_requests), 1)     # gave up after the first failure
+        self.assertIn("filter?keyword=Show+0", d)
+        self.up_next(at(22, 6, 30))
+        self.assertEqual(len(self.world.anikoto_requests), 1)     # still paused
+        self.world.anikoto_down = False
+        self.up_next(at(22, 7, 15))
+        self.assertGreater(len(self.world.anikoto_requests), 1)
+
+    def test_up_next_toggle_back_to_mal(self):
+        self.world.add("watching", 1, "Ao no Hako Season 2", english="Blue Box Season 2",
+                       next_ep={"episode": 8, "airingAt": at(23, 19)})
+        d = self.up_next(UP_NEXT_ANIKOTO="false")
+        self.assertIn("(https://myanimelist.net/anime/1)", d)
+        self.assertEqual(self.world.anikoto_requests, [])
+
+    def test_up_next_long_list_never_cuts_a_link(self):
+        for i in range(60):
+            self.world.add("watching", 1 + i, f"A Fairly Long Anime Title Number {i:02d}",
+                           next_ep={"episode": 2, "airingAt": at(23, 1) + i * 600})
+        d = self.up_next()
+        self.assertLessEqual(len(d), 4096)
+        self.assertRegex(d, r"…and \d+ more$")
+        self.assertEqual(d.count("**[") * 2, d.count("**") - 0)   # every bold title is closed
+
     def test_norm_title(self):
         n = ramune.norm_title
         self.assertEqual(n("Tensei shitara Ken deshita II"), n("Tensei Shitara Ken Deshita 2nd Season"))
