@@ -14,6 +14,8 @@ Standard library only, so the workflow needs no pip install.
 """
 
 import hashlib
+import html
+import re
 import json
 import os
 import sys
@@ -22,6 +24,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from datetime import datetime, timedelta, timezone
+from html.parser import HTMLParser
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 STATE_PATH = os.path.join(ROOT, "state", "state.json")
@@ -37,6 +40,7 @@ HEARTBEAT_EVERY = 7 * 86400     # touch state weekly so the repo never looks ina
 FAIL_ALERT_AFTER = 8            # consecutive upstream failures (~2h) before the run goes red
 ANIKOTO_DEFAULT = "https://anikototv.bz"   # search lives at /filter?keyword=
 RELEASED = ("RELEASING", "FINISHED")
+ANIKOTO_MISS_RETRY = 24 * 3600  # a show Anikoto didn't have is searched again after a day
 
 
 # --------------------------------------------------------------------------- utils
@@ -227,6 +231,7 @@ class Config:
         # 2) Crunchyroll + Anikoto links in the morning schedule
         self.summary_links = env_bool("SUMMARY_LINKS", True)
         self.anikoto = env("ANIKOTO_URL", ANIKOTO_DEFAULT)
+        self.anikoto_direct = env_bool("ANIKOTO_DIRECT", True)   # exact episode links when found
         # 3) Plan to Watch: alert on premiere / full release
         self.ptw_alerts = env_bool("PTW_ALERTS", True)
 
@@ -312,6 +317,7 @@ query ($ids: [Int], $page: Int) {
       id idMal status episodes format siteUrl
       startDate { year month day }
       title { romaji english }
+      synonyms
       coverImage { large color }
       nextAiringEpisode { episode airingAt }
       externalLinks { site url type }
@@ -394,10 +400,13 @@ def build_show(mal, media):
         "mal_url": f"https://myanimelist.net/anime/{mal['mal_id']}",
         "next": media.get("nextAiringEpisode"),
         "watched": mal.get("watched"),
+        "mal_title": mal.get("title"),
         "streams": streams[:3],
         "crunchyroll": crunchyroll,
         "format": media.get("format"),
         "start": media.get("startDate") or {},
+        "names": [n for n in [title.get("english"), title.get("romaji"), mal.get("title"), mal.get("title_en")]
+                  + list(media.get("synonyms") or []) if n],
     }
 
 
@@ -408,29 +417,152 @@ def md_url(url):
     return url.replace(" ", "%20").replace("(", "%28").replace(")", "%29")
 
 
-def anikoto_url(cfg, title):
-    """Anikoto has no ID we can look up (its show URLs end in a random code like
-    /watch/overgeared-a487c), so this is a search for the title on the site.
-    ANIKOTO_URL can be a domain (search at /filter?keyword=) or a full template with {q}."""
+def anikoto_parts(cfg):
+    """(origin, search_template) from ANIKOTO_URL, or None if Anikoto is off.
+    ANIKOTO_URL can be a domain (search at /filter?keyword=) or a full search URL with {q}."""
     base = (cfg.anikoto or "").strip()
     if not base or base.lower() in ("off", "false", "none", "0"):
         return None
     if not base.lower().startswith(("http://", "https://")):
         base = "https://" + base
-    q = urllib.parse.quote_plus(title or "")
-    if "{q}" in base:
-        return base.replace("{q}", q)
-    return f"{base.rstrip('/')}/filter?keyword={q}"
+    parsed = urllib.parse.urlsplit(base)
+    origin = f"{parsed.scheme}://{parsed.netloc}"
+    template = base if "{q}" in base else f"{base.rstrip('/')}/filter?keyword={{q}}"
+    return origin, template
 
 
-def watch_links(cfg, show):
-    """Crunchyroll (from AniList, show page) and Anikoto (title search), as markdown."""
+def anikoto_url(cfg, title):
+    """Search link for a title (the fallback when there's no exact match)."""
+    parts = anikoto_parts(cfg)
+    if not parts:
+        return None
+    return parts[1].replace("{q}", urllib.parse.quote_plus(title or ""))
+
+
+_ROMAN = {"ii": "2", "iii": "3", "iv": "4", "v": "5", "vi": "6"}
+
+
+def norm_title(text):
+    """Loose title key: case, punctuation, "Season 2" / "2nd Season" / "II" / "Part 2" all compare equal,
+    but "Blue Box" and "Blue Box Season 2" stay different."""
+    t = html.unescape(text or "").lower().replace("&", " and ")
+    words = re.findall(r"[a-z0-9]+", t)
+    out = []
+    for w in words:
+        w = _ROMAN.get(w, w)
+        w = re.sub(r"^(\d+)(st|nd|rd|th)$", r"\1", w)
+        if w in ("season", "part", "cour", "the", "a"):
+            continue
+        out.append(w)
+    return "".join(out)
+
+
+class _AnikotoResults(HTMLParser):
+    """Collects search results: <a class="name d-title" href=".../watch/<slug>/ep-1" data-jp="Romaji">English</a>."""
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.items, self._cur = [], None
+
+    def handle_starttag(self, tag, attrs):
+        if tag != "a":
+            return
+        a = dict(attrs)
+        classes = (a.get("class") or "").split()
+        if "d-title" in classes and "/watch/" in (a.get("href") or ""):
+            self._cur = {"href": a["href"], "jp": a.get("data-jp") or "", "name": ""}
+
+    def handle_data(self, data):
+        if self._cur is not None:
+            self._cur["name"] += data
+
+    def handle_endtag(self, tag):
+        if tag == "a" and self._cur is not None:
+            self.items.append(self._cur)
+            self._cur = None
+
+
+def anikoto_slug_from_href(href):
+    m = re.search(r"/watch/([^/?#]+)", href or "")
+    return m.group(1) if m else None
+
+
+def fetch_text(url, what):
+    """Best-effort GET of an HTML page. Never raises: a failure just means no direct link."""
+    req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT, "Accept": "text/html"})
+    for attempt in range(2):
+        try:
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                return resp.read().decode("utf-8", "replace")
+        except Exception as err:
+            if attempt:
+                log(f"  {what}: {err}")
+            else:
+                time.sleep(2)
+    return None
+
+
+def anikoto_lookup(cfg, state, show, now):
+    """Find the show's Anikoto slug (cached in state forever; misses retried after a day)."""
+    if not cfg.anikoto_direct:
+        return None
+    parts = anikoto_parts(cfg)
+    if not parts:
+        return None
+    cache = state.setdefault("anikoto", {})
+    key = str(show["anilist_id"])
+    hit = cache.get(key)
+    if isinstance(hit, str):
+        return hit
+    if isinstance(hit, int) and now - hit < ANIKOTO_MISS_RETRY:
+        return None
+    wanted = {norm_title(n) for n in show.get("names") or [show["title"]]} - {""}
+    queries = []
+    for q in (show.get("mal_title"), show["title"], show.get("romaji")):
+        if q and q not in queries:
+            queries.append(q)
+    for q in queries[:2]:
+        page = fetch_text(parts[1].replace("{q}", urllib.parse.quote_plus(q)), "Anikoto")
+        if page is None:
+            return None  # site unreachable: don't record a miss, try again next time
+        parser = _AnikotoResults()
+        try:
+            parser.feed(page)
+        except Exception:
+            continue
+        for item in parser.items:
+            if norm_title(item["name"]) in wanted or norm_title(item["jp"]) in wanted:
+                slug = anikoto_slug_from_href(item["href"])
+                if slug:
+                    cache[key] = slug
+                    log(f"Anikoto: {show['title']} -> {slug}")
+                    return slug
+    cache[key] = now
+    log(f"Anikoto: no exact match for {show['title']} (using a search link)")
+    return None
+
+
+def anikoto_episode_url(cfg, slug, episode):
+    parts = anikoto_parts(cfg)
+    return f"{parts[0]}/watch/{slug}/ep-{int(episode)}" if parts and slug else None
+
+
+def watch_links(cfg, show, episode=None, state=None, now=None):
+    """Crunchyroll (from AniList, series page) and Anikoto, as markdown. Anikoto links straight to the
+    episode when the show was matched on Anikoto, otherwise to a search for its title."""
     links = []
     if show.get("crunchyroll"):
         links.append(f"[Crunchyroll]({md_url(show['crunchyroll'])})")
-    ak = anikoto_url(cfg, show["title"])
-    if ak:
-        links.append(f"[Anikoto]({md_url(ak)})")
+    ak = None
+    if episode is not None and state is not None:
+        slug = anikoto_lookup(cfg, state, show, now or int(time.time()))
+        ak = anikoto_episode_url(cfg, slug, episode)
+        if ak:
+            links.append(f"[Anikoto Ep {int(episode)}]({md_url(ak)})")
+    if not ak:
+        ak = anikoto_url(cfg, show["title"])
+        if ak:
+            links.append(f"[Anikoto]({md_url(ak)})")
     return links
 
 
@@ -505,7 +637,7 @@ def announce(cfg, show, ep, now):
     discord_post(cfg, {"content": clip(content, 2000), "embeds": [episode_embed(cfg, show, ep, now)]})
 
 
-def send_summary(cfg, shows, schedule, now):
+def send_summary(cfg, shows, schedule, now, state=None):
     local_now = datetime.fromtimestamp(now, cfg.tz)
     day_start = int(local_now.replace(hour=0, minute=0, second=0, microsecond=0).timestamp())
     day_end = int((datetime.fromtimestamp(day_start, cfg.tz) + timedelta(days=1)).timestamp())
@@ -519,7 +651,7 @@ def send_summary(cfg, shows, schedule, now):
             clock = fmt_clock(datetime.fromtimestamp(e["airingAt"], cfg.tz))
             line = f"{mark} `{clock:>8}`  [{clip(show['title'], 80)}]({show['mal_url']}) · Ep {e['episode']}"
             if cfg.summary_links:
-                links = watch_links(cfg, show)
+                links = watch_links(cfg, show, e["episode"], state, now)
                 if links:
                     line += "\n\u2003\u2003" + " · ".join(links)
             lines.append(line)
@@ -790,7 +922,7 @@ FORMAT_NAMES = {"TV": "TV", "TV_SHORT": "TV short", "MOVIE": "Movie", "SPECIAL":
                 "OVA": "OVA", "ONA": "ONA", "MUSIC": "Music"}
 
 
-def ptw_embed(cfg, show, kind, when, now):
+def ptw_embed(cfg, show, kind, when, now, state=None):
     total = show.get("episodes")
     if kind == "movie":
         headline = "**The movie is out!**"
@@ -809,7 +941,7 @@ def ptw_embed(cfg, show, kind, when, now):
     fields.append({"name": "Format", "value": fmt, "inline": True})
     if when:
         fields.append({"name": "Aired", "value": f"{fmt_local(when, cfg.tz)} ({cfg.tz_label})", "inline": True})
-    links = watch_links(cfg, show) or [f"[MyAnimeList]({show['mal_url']})"]
+    links = watch_links(cfg, show, 1, state, now) or [f"[MyAnimeList]({show['mal_url']})"]
     fields.append({"name": "Watch", "value": clip(" · ".join(links), 1024), "inline": False})
 
     embed = {
@@ -886,7 +1018,7 @@ def check_plan_to_watch(cfg, state, now):
             content = f"🫧 {len(group)} shows from your Plan to Watch are out"
         log(f"Plan to Watch out: {names}")
         discord_post(cfg, {"content": clip(content, 2000),
-                           "embeds": [ptw_embed(cfg, s, kind, when, now) for s, (kind, when) in group]})
+                           "embeds": [ptw_embed(cfg, s, kind, when, now, state) for s, (kind, when) in group]})
         for s, _ in group:
             key = str(s["mal_id"])
             seen.pop(key, None)
@@ -1011,7 +1143,7 @@ def process(cfg, state, now):
         cfg.daily_summary and local_now.hour >= cfg.summary_hour and state.get("last_summary") != today_str
     ):
         log("Sending today's schedule")
-        today = send_summary(cfg, shows, schedule, now)
+        today = send_summary(cfg, shows, schedule, now, state)
         state["last_summary"] = today_str
         state["digest"] = {"date": today_str, "eps": {f"{e['mediaId']}:{e['episode']}": e["airingAt"] for e in today}}
     elif cfg.schedule_changes and (state.get("digest") or {}).get("date") == today_str:

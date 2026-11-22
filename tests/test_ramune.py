@@ -36,6 +36,26 @@ class World:
         self.patches = []
         self.requests = []         # (what, detail)
         self.webhook_gone = False
+        self.anikoto = []          # (english, romaji, slug) results Anikoto's search knows
+        self.anikoto_down = False
+        self.anikoto_requests = []
+
+    def fetch_text(self, url, what):
+        self.anikoto_requests.append(url)
+        if self.anikoto_down:
+            return None
+        q = urllib.parse.parse_qs(urllib.parse.urlsplit(url).query).get("keyword", [""])[0].lower()
+        words = [w for w in q.split() if len(w) > 2]
+        items = "".join(
+            f'<div class="item "><div class="inner"><div class="ani poster tip" data-tip="8">'
+            f'<a href="https://anikototv.bz/watch/{slug}/ep-1"><img alt="{en}" /></a></div>'
+            f'<div class="info"><div class="b1"><a class="name d-title" href="https://anikototv.bz/watch/{slug}/ep-1"'
+            f' data-jp="{jp}">{en}</a></div></div></div></div>'
+            for en, jp, slug in self.anikoto
+            if any(w in (en + " " + jp).lower() for w in words))
+        sidebar = ('<a href="https://anikototv.bz/watch/one-piece-odmau">One Piece</a>'
+                   '<a class="name" href="https://anikototv.bz/watch/kill-blue-gcqj5">Kill Blue</a>')
+        return f'<html><body><div id="list-items" class="ani items">{items}</div>{sidebar}</body></html>'
 
     # ---- builders
     def add(self, list_name, mal_id, title, aid=None, status="RELEASING", episodes=12, fmt="TV",
@@ -126,6 +146,7 @@ class Base(unittest.TestCase):
         self.logs = []
         patches = [
             mock.patch.object(ramune, "http", self.world.http),
+            mock.patch.object(ramune, "fetch_text", self.world.fetch_text),
             mock.patch.object(ramune.time, "sleep", lambda s: None),
             mock.patch.dict(os.environ, {"GITHUB_STEP_SUMMARY": ""}),
             mock.patch.object(ramune, "log", self.logs.append),
@@ -588,6 +609,131 @@ class PlanToWatch(Base):
         self.assertFalse(ramune.start_reached({"start": {"year": 2026, "month": 11, "day": 23}}, now))
         self.assertTrue(ramune.start_reached({"start": {"year": 2026, "month": None, "day": None}}, now))
         self.assertTrue(ramune.start_reached({"start": {}}, now))
+
+
+# =========================================================================== exact Anikoto episode links
+
+REAL_ANIKOTO = [  # captured from anikototv.bz search results on 2026-11-22
+    ("Blue Box", "Ao no Hako", "blue-box-ddjdm"),
+    ("Blue Box Season 2", "Ao no Hako Season 2", "blue-box-season-2"),
+    ("Blue Lock Season 2", "Blue Lock vs. U-20 Japan", "blue-lock-season-2-54rmn"),
+    ("Overgeared", "Tempal: Item no Chikara", "overgeared-a487c"),
+    ("Chitose Is in the Ramune Bottle", "Chitose-kun wa Ramune Bin no Naka", "chitose-is-in-the-ramune-bottle-lvlwo"),
+    ("Chitose Is in the Ramune Bottle Part 2", "Chitose-kun wa Ramune Bin no Naka Part 2",
+     "chitose-is-in-the-ramune-bottle-part-2-3dfd8"),
+    ("Tensei Shitara Ken Deshita 2nd Season", "Tensei Shitara Ken Deshita 2nd Season",
+     "tensei-shitara-ken-deshita-2nd-season"),
+    ("The World&#039;s Finest Assassin Gets Reincarnated in a Different World as an Aristocrat",
+     "Sekai Saikou no Ansatsusha, Isekai Kizoku ni Tensei suru",
+     "the-world-s-finest-assassin-gets-reincarnated-in-a-different-world-as-an-aristocrat-z0xmr"),
+    ("Firefly Wedding", "Hotaru no Yomeiri", "firefly-wedding-94459"),
+]
+
+
+class AnikotoEpisodeLinks(Base):
+    def setUp(self):
+        super().setUp()
+        self.env["PTW_ALERTS"] = "false"
+        self.world.anikoto = list(REAL_ANIKOTO)
+
+    def add_today(self, mal_id, mal_title, english=None, romaji=None, ep=7, hour=19, synonyms=None):
+        aid = self.world.add("watching", mal_id, mal_title, english=english)
+        if romaji:
+            self.world.media[mal_id]["title"]["romaji"] = romaji
+        self.world.media[mal_id]["synonyms"] = synonyms or []
+        self.world.schedule.append({"mediaId": aid, "episode": ep, "airingAt": at(22, hour)})
+        return aid
+
+    def summary(self, day=22, **env):
+        self.run_at(at(day, 9, 5), **env)
+        return self.world.summaries()[-1]["embeds"][0]["description"]
+
+    def test_exact_episode_links_for_real_titles(self):
+        self.add_today(1, "Ao no Hako Season 2", "Blue Box Season 2", ep=8)
+        self.add_today(2, "Tempal: Item no Chikara", "Overgeared", ep=9, hour=20)
+        self.add_today(3, "Chitose-kun wa Ramune Bin no Naka Part 2", "Chitose Is in the Ramune Bottle 2nd Cour",
+                       ep=5, hour=21)
+        self.add_today(4, "Tensei shitara Ken deshita II", "Reincarnated as a Sword Season 2",
+                       romaji="Tensei Shitara Ken Deshita 2nd Season", ep=7, hour=22)
+        self.add_today(5, "Sekai Saikou no Ansatsusha, Isekai Kizoku ni Tensei suru",
+                       "The World's Finest Assassin Gets Reincarnated in Another World as an Aristocrat", ep=3, hour=23)
+        d = self.summary()
+        self.assertIn("[Anikoto Ep 8](https://anikototv.bz/watch/blue-box-season-2/ep-8)", d)
+        self.assertIn("[Anikoto Ep 9](https://anikototv.bz/watch/overgeared-a487c/ep-9)", d)
+        self.assertIn("(https://anikototv.bz/watch/chitose-is-in-the-ramune-bottle-part-2-3dfd8/ep-5)", d)
+        self.assertIn("(https://anikototv.bz/watch/tensei-shitara-ken-deshita-2nd-season/ep-7)", d)
+        self.assertIn("aristocrat-z0xmr/ep-3)", d)
+        self.assertNotIn("blue-box-ddjdm", d)                  # season 1 never picked for season 2
+        self.assertNotIn("chitose-is-in-the-ramune-bottle-lvlwo", d)
+
+    def test_slug_cached_no_repeat_searches(self):
+        self.add_today(1, "Ao no Hako Season 2", "Blue Box Season 2")
+        self.summary(22)
+        n = len(self.world.anikoto_requests)
+        self.assertEqual(n, 1)
+        self.world.schedule.append({"mediaId": 100001, "episode": 8, "airingAt": at(23, 19)})
+        d = self.summary(23)
+        self.assertEqual(len(self.world.anikoto_requests), n)
+        self.assertIn("blue-box-season-2/ep-8", d)
+
+    def test_no_match_falls_back_to_search_and_retries_after_a_day(self):
+        self.add_today(1, "Hotaru no Yomeiri 2", "Firefly Wedding 2")
+        d = self.summary(22)
+        self.assertIn("[Anikoto](https://anikototv.bz/filter?keyword=Firefly+Wedding+2)", d)
+        self.assertNotIn("firefly-wedding-94459", d)           # near miss is not used
+        self.assertEqual(len(self.world.anikoto_requests), 2)  # MAL title, then English
+        self.run_at(at(22, 15))
+        self.assertEqual(len(self.world.anikoto_requests), 2)
+        self.world.schedule.append({"mediaId": 100001, "episode": 8, "airingAt": at(23, 19)})
+        self.summary(23)
+        self.assertEqual(len(self.world.anikoto_requests), 4)
+
+    def test_site_down_falls_back_without_caching_a_miss(self):
+        self.add_today(1, "Ao no Hako Season 2", "Blue Box Season 2")
+        self.world.anikoto_down = True
+        d = self.summary()
+        self.assertIn("[Anikoto](https://anikototv.bz/filter?keyword=Blue+Box+Season+2)", d)
+        self.assertNotIn("100001", self.state.get("anikoto", {}))
+        self.assertEqual(self.run_at(at(22, 9, 20)), 0)
+
+    def test_domain_change_keeps_slugs(self):
+        self.add_today(1, "Ao no Hako Season 2", "Blue Box Season 2")
+        self.summary(22)
+        self.world.schedule.append({"mediaId": 100001, "episode": 8, "airingAt": at(23, 19)})
+        d = self.summary(23, ANIKOTO_URL="kotoplay.example")
+        self.assertIn("(https://kotoplay.example/watch/blue-box-season-2/ep-8)", d)
+
+    def test_direct_toggle_off(self):
+        self.add_today(1, "Ao no Hako Season 2", "Blue Box Season 2")
+        d = self.summary(ANIKOTO_DIRECT="false")
+        self.assertIn("filter?keyword=", d)
+        self.assertEqual(self.world.anikoto_requests, [])
+
+    def test_ptw_alert_links_episode_1(self):
+        self.env["PTW_ALERTS"] = "true"
+        self.env["DAILY_SUMMARY"] = "false"
+        self.world.add("plan_to_watch", 9, "Hotaru no Yomeiri", english="Firefly Wedding",
+                       status="NOT_YET_RELEASED", next_ep={"episode": 1, "airingAt": at(23, 1)})
+        self.run_at(at(22, 10))
+        self.world.media[9].update(status="RELEASING", nextAiringEpisode={"episode": 2, "airingAt": at(30, 1)})
+        self.run_at(at(23, 1, 10))
+        e = self.world.ptw_posts()[0]["embeds"][0]
+        watch = [f for f in e["fields"] if f["name"] == "Watch"][0]["value"]
+        self.assertIn("[Anikoto Ep 1](https://anikototv.bz/watch/firefly-wedding-94459/ep-1)", watch)
+
+    def test_norm_title(self):
+        n = ramune.norm_title
+        self.assertEqual(n("Tensei shitara Ken deshita II"), n("Tensei Shitara Ken Deshita 2nd Season"))
+        self.assertEqual(n("Chitose Is in the Ramune Bottle 2nd Cour"), n("Chitose Is in the Ramune Bottle Part 2"))
+        self.assertEqual(n("Blue Box Season 2"), n("Blue Box 2nd Season"))
+        self.assertNotEqual(n("Blue Box"), n("Blue Box Season 2"))
+        self.assertEqual(n("The World&#039;s Finest"), n("The World's Finest"))
+        self.assertEqual(n(""), "")
+
+    def test_parser_ignores_sidebar_links(self):
+        p = ramune._AnikotoResults()
+        p.feed(self.world.fetch_text("https://anikototv.bz/filter?keyword=zzzz", "Anikoto"))
+        self.assertEqual(p.items, [])
 
 
 # =========================================================================== upgrade from the live state

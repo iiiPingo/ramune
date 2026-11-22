@@ -74,6 +74,7 @@ Same page → **Variables** tab → **New repository variable**:
 | `FAIL_ALERT_FROM` / `FAIL_ALERT_TO` | local hours that message may be sent in (`13` to `23` = 1 PM up to 11 PM) | optional (default `13` / `23`) |
 | `SUMMARY_LINKS` | `false` to drop the Crunchyroll / Anikoto links from the morning schedule | optional (default on) |
 | `ANIKOTO_URL` | Anikoto's current domain, e.g. `anikototv.bz`, or a full search URL with `{q}` for the title, or `off` | optional (default `https://anikototv.bz`) |
+| `ANIKOTO_DIRECT` | `false` to skip the Anikoto lookup and always link a title search | optional (default on) |
 | `PTW_ALERTS` | `false` to stop Plan to Watch alerts | optional (default on) |
 
 ### 6. Run the test
@@ -124,9 +125,14 @@ Discord also holds mobile pushes while you're active on desktop; that's
 Each show in the morning schedule gets two links:
 - **Crunchyroll:** taken from AniList's streaming links when the show has one. It goes to the series page;
   AniList doesn't have per-episode Crunchyroll links.
-- **Anikoto:** a search for the show's title. Anikoto's show URLs end in a random code
-  (`/watch/overgeared-a487c`), which nothing outside the site knows, so a direct link would mean scraping
-  Anikoto every run. The search is the reliable option. When Anikoto moves domains, change `ANIKOTO_URL`.
+- **Anikoto:** a link straight to that day's episode (`/watch/overgeared-a487c/ep-9`). Anikoto's show
+  pages end in a random code, so the first time a show appears Ramune searches Anikoto for it and only
+  accepts a result whose English or Japanese title matches the show's MAL/AniList titles exactly
+  ("Season 2", "2nd Season", "II" and "Part 2" count as the same; season 1 never matches season 2).
+  The code is saved in `state.json`, so each show is searched once, ever. No exact match, or Anikoto
+  unreachable from GitHub: you get a search link for the title instead, and a missing show is retried a day
+  later. Set `ANIKOTO_DIRECT=false` to always use search links. When Anikoto moves domains, change
+  `ANIKOTO_URL`; saved codes keep working on the new domain.
 
 ## Plan to Watch alerts
 

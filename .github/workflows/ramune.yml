@@ -43,6 +43,7 @@ jobs:
           FAIL_ALERT_TO: ${{ vars.FAIL_ALERT_TO }}
           SUMMARY_LINKS: ${{ vars.SUMMARY_LINKS }}
           ANIKOTO_URL: ${{ vars.ANIKOTO_URL }}
+          ANIKOTO_DIRECT: ${{ vars.ANIKOTO_DIRECT }}
           PTW_ALERTS: ${{ vars.PTW_ALERTS }}
           MODE: ${{ inputs.mode || 'normal' }}
         run: python3 ramune.py
