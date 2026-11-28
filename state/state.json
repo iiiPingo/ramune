@@ -229,6 +229,11 @@
       "mal_id": 64340,
       "since": 1795188264,
       "title": "Overgeared"
+    },
+    "21698": {
+      "mal_id": 32935,
+      "since": 1795828891,
+      "title": "HAIKYU!! 3rd Season"
     }
   },
   "up_next": {
@@ -236,6 +241,7 @@
     "id": "1573372112545251449"
   },
   "watching_cache": {
+    "32935": "Haikyuu!! Karasuno Koukou vs. Shiratorizawa Gakuen Koukou",
     "47790": "Sekai Saikou no Ansatsusha, Isekai Kizoku ni Tensei suru",
     "53913": "Tensei shitara Ken deshita II",
     "61323": "Ao no Hako Season 2",
